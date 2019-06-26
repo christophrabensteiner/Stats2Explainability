@@ -1,0 +1,266 @@
+--- 
+title: "05 - Model Explainability"
+author: "Christoph Rabensteiner - 1810837995"
+date: "20 6 2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, warning = FALSE, echo=F, message=FALSE}
+library(ISLR)
+library(caret)
+library(stats)
+library(fastDummies) 
+library(dplyr)
+library(randomForest)
+library(rfPermute)
+library(vip)
+library(ggplot2)
+library(pdp)
+library(neuralnet)
+library(MASS)
+library(tidyverse)
+library(caret)
+library(ModelMetrics)
+require(devtools)
+library(nnet)
+library(mlbench)
+source_gist('6206737')
+library(iml)
+```
+
+```{r}
+uin = 1810837995
+set.seed(uin)
+oj_idx = createDataPartition(OJ$Purchase, p = 0.5, list = FALSE)
+oj_trn = OJ[oj_idx,]
+oj_tst = OJ[-oj_idx,]
+```
+
+Struktur des Dataframe:
+```{r}
+str(OJ)
+```
+
+Wertgitter für `C`
+```{r, echo=T}
+lin_grid = expand.grid(C = c(2 ^ (-5:5)))
+```
+
+5-fache Kreuzvalidierung:
+```{r, echo=T}
+ctrl <- trainControl(method="repeatedcv",
+                     repeats=5,	
+                     summaryFunction=twoClassSummary,
+                     classProbs=TRUE)
+```
+
+Training mit Random Forest:
+```{r,  message = FALSE, warning = FALSE}
+rf.tune <- train(Purchase~.,data=oj_trn,
+                    method = "rf",
+                    preProc = c("center","scale"),
+                    metric="ROC",
+                    importance = T,
+                    ntree= 300,
+                    trControl=ctrl)	
+
+```
+
+```{r,  message = FALSE, warning = FALSE, echo=F}
+predict1 <- predict(rf.tune, oj_tst)
+```
+
+#1) Variable Importance / Variable Permutation
+
+MIt dieser Methode wird aufgezeigt, welche Variable den größten Einfluss auf die Vorhersage hat. Um dies zu testen werden jeweils die Werte einer Variable `gemischt`. Wenn durch die Mischung eine ganz andere Vorhersage herauskommt, dann hat die Variable wahrscheinlich einen hohen Einfluss auf die Genauigkeit der Vorhersage. Wenn sich hingegen die Genauigkeit nur wenig ändert, dann werden auch die Werte der Variable weniger bei der Vorhersage gewichtet. 
+
+
+**Variable Importance mit dem caret-Packet**
+
+Die wichtigsten Variablen für den obigen Random Forest sind folgende:
+**Bemerkung:** Alle wichtigen Maße werden auf einen Maximalwert von 100 skaliert. 
+
+```{r,  message = FALSE, warning = FALSE}
+varImp(rf.tune)
+```
+Die wichtigste Variable ist mit Abstand `LoyalCH`.
+
+
+**Variable Permutation mit dem rfPermute-Paket**
+
+```{r}
+rfPerm <- rfPermute(Purchase ~.,data=oj_trn, ntree=500, na.action = na.omit, nrep = 50, num.cores =1)
+```
+
+
+```{r, eval=F, echo=F}
+#Nullverteilung der beobachteten Werte:
+plotNull(rfPerm)
+```
+
+Skalierte `importance distripution` und `signifikante Prädiktoren`:
+```{r, echo=F}
+rp.importance(rfPerm, scale=T)
+```
+
+Visualisierung der `Importance Variable` mit skalierten Werten:
+
+```{r}
+plot(rp.importance(rfPerm,scale = T))
+```
+
+Beim Vergleich der zwei Variablen-Permutation Methoden fällt auf, dass zwar die ersten zwei Variablen bei beiden gleich (bzw. gleich wichtig sind), dannach gibt es aber Unterschiede bei den wichtigsten Prädiktoren. Am ausschlaggebensten ist bei allen drei Tests mit Abstand die Variable `LoyalCH`. Gegenüber den obigen Plot wird hier auch noch der durchschnittliche Rückgang der `Accuracy` angezeigt. 
+
+**Variable Importance mit dem vip- & randomForest-Packet**
+
+```{r, echo =F, message=F, results=F}
+rf2 <- randomForest(Purchase ~.,oj_trn,prox=T,ntree=500)
+```
+
+```{r}
+vip::vip(rf2,bar=F,horizontal = T, size =1.5)
+```
+
+
+Auch hier ist die LoyalCH wieder die einflussreichste Variable, gefollgt von WeekofPurchase und PriceDiff. Wobei WeekofPurchase und PriceDiff schon mit Abstand weniger bedeutent sind als LoyalCH.
+
+**Variable Importance mit einem Neuronalem Netz**
+Datensatz: Boston (MASS)
+
+
+Preprocessing & Modellierung:
+```{r, warning=FALSE, results=F}
+maxdata <- apply(Boston,2,max)
+mindata = apply(Boston,2,min)
+
+data_scaled <- as.data.frame(scale(Boston, center = mindata, scale=maxdata-mindata))
+
+set.seed(uin)
+index = sample(1:nrow(Boston), round(0.70*nrow(Boston)))
+
+train_data <- as.data.frame(data_scaled[index,])
+test_data <- as.data.frame(data_scaled[-index,1:13])
+
+NNModel <- nnet(medv~.,data=train_data, size=7, decay=0.1, maxit=500)
+```
+
+Variable Importance:
+```{r}
+varImp(NNModel)
+```
+Die wichtigsten Variablen für das Model sind `lstat`, `rm`, `dis`und `rad`. Am wenigsten Einfluss auf das Model haben `age`, `zn` und `chas`
+
+Der relative Einfluss kann gut auf folgender Graphik ausgelesen werdern:
+```{r, warning=F, message=F, echo=T}
+gar.fun('y',NNModel)
+```
+
+
+Auch hier sehen wir, dasss die Variablen `age`, `zn` und `chas` einen geringen Einfluss auf das Modell haben. Was wir hier noch zusätzlich sehen ist, dass `lstat` den größten `negativen` Einfluss hat, gefolgt von `dis`. Den größten positiven Einfluss hat `rm`.
+
+
+
+#2) Partial Dependence Plot
+
+**Partial Plots mit dem pdp-Packet**
+
+Nun werden die Partial Plots auf dem zweiten Random Forest Model (Datensatz OJ) angewendet bzw. dargestellt (vergleiche: **Variable Importance mit dem vip- & randomForest-Packet**).
+
+Mit dem Partial Dependence Plot wird der Einfluss einer Variable im Model. Dabei wird nicht, die `Importance` einer Variable gezeigt, sondern wie der Wert der Variable im Model berücksichtigt wird bzw. wie die Beziehung zwischen Output und Prädiktoren angezeigt. 
+
+Im folgenden werden die Partial Plot anhand fünf Variablen angezeigt:
+
+Partial Plot für `LoyalCH`:
+```{r}
+partialPlot(rf2,OJ,x.var="LoyalCH", ylab="Ziel-Output")
+```
+
+Der `Partial Plot`für `LoyalCH`zeigt, dass ein Wert zwischen 0.0 und 0.4 zu einem negativen Output führt und ab einen Wert von 0.4 stark steigt. 
+
+
+
+Partial Plot für `WeekofPurchase`:
+```{r}
+partialPlot(rf2,OJ,x.var="WeekofPurchase", ylab="Ziel-Output")
+```
+
+Partial Plot für `PriceDiff`:
+```{r}
+partialPlot(rf2,OJ,x.var="PriceDiff", ylab="Ziel-Output")
+```
+
+Partial Plot für `StoreID`:
+```{r}
+partialPlot(rf2,OJ,x.var="StoreID", ylab="Ziel-Output")
+```
+
+Partial Plot für `Store7`:
+```{r}
+partialPlot(rf2,OJ,x.var="Store7", ylab="Ziel-Output")
+```
+
+Partial Plot für `Store7`:
+```{r}
+graphics.off()
+options(scipen=999)
+partialPlot(rf2,OJ,x.var="PriceMM", ylab="Ziel-Output")
+```
+
+Auch für Faktor-Variablen kann der Partial Plot angewendet werden. Dabei sieht man, dass `Store7 = Yes` einen größeren Einfluss auf den Output hat. 
+
+
+
+#3) Shap Values
+
+**Shap-Values unter Verwendung des iml-Paket**
+
+Wir betrachten wieder den OJ Datensatz mit dem Random Forest Model `rf2`.
+
+Mithilfe des SHAP-Values (ein Akronym aus SHapley Additive exPlanations) kann man die Auswirkungen von Variablen unter Berücksichtigung der Interaktion mit anderen Variablen messen. 
+SHAP Values zerlegen eine Vorhersage, um die Auswirkungen jeder einzelnen Features anzuzeigen. Sie interpretieren die Auswirkungen eines bestimmten Wertes für ein bestimmtes Merkmal im Vergleich zu der Vorhersage, die wir machen würden, wenn dieses Merkmal einen Basiswert annehmen würde.
+
+
+Preprocessing:
+```{r}
+X = OJ[which(names(OJ) != "Purchase")]
+predictor = Predictor$new(rf2, data = X, y = OJ$Purchase)
+```
+
+**Feature Importance based on SHAP**
+Auch hier können wir wieer die Feature-Importance anzeigen lassen:
+Mit FeatureImp können wir messen, wie wichtig jedes Merkmal für die Vorhersagen war. Die Feature-Value werden berechnet, indem jedes Feature gemischt wird und gemessen wird, wie stark die Leistung sinkt. Sobald wir ein neues Objekt von FeatureImp erstellen, wird die Wichtigkeit automatisch berechnet.
+
+```{r, warning=FALSE}
+imp2 = FeatureImp$new(predictor, loss = "ce")
+plot(imp2)
+```
+
+
+Was wir hier aber jetzt betrachten, sind die Auswirkungen der Merkmale anhand eines Merkmals beeinflusst werden. Angenommen, die Merkmalswerte spielen für einen Datenpunkt ein Spiel zusammen, in dem sie die Vorhersage als Auszahlung erhalten. Der Shapley-Wert sagt uns, wie wir die Auszahlung fair auf die Merkmalswerte verteilen können. 
+Hier z.B.: wird das Modell anhand der Variable `LoyalCH`erklärt:
+```{r}
+shapley = Shapley$new(predictor, x.interest = X[14,])
+shapley$plot()
+```
+
+Da unser Output entweder `CH` oder `MM` ist (binär), erhalten wir einen Plot für je einen Outputwert. Was hier gleich auffällt, ist, dass die Variablen sich genau spiegelverkehrt verhalten. 
+
+Wir können den Plot auch für jeden anderen Datenpunkt aufzeigen:
+```{r}
+shapley = Shapley$new(predictor, x.interest = X[1,])
+shapley$plot()
+```
+
+
+```{r,echo=F, eval=F}
+shap_values=predict(rf.tune, oj_tst, predcontrib = TRUE, approxcontrib = F)
+shap_values
+```
+
